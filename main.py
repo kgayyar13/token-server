@@ -193,3 +193,10 @@ def inventory_debug(text: str = Query("2024 volkswagen tiguan")):
         }
     except Exception as e:
         return {"url": url, "error": str(e)}
+
+@app.get("/inventory/links")
+def inventory_links(text: str = Query("2024 volkswagen tiguan")):
+    url = f"{BASE}{INV}?text={'+'.join(text.split())}"
+    html = fetch(url)
+    urls = extract_vehicle_links(html)
+    return {"count": len(urls), "urls": urls[:10]}
