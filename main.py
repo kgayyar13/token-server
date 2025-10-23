@@ -61,26 +61,81 @@ def extract_vehicle_links(html: str):
     return list(links)
 
 def enrich_vehicle(url, make=None, model=None, year=None):
+    """Fetch detail page and extract all key data."""
     v = {
-        "url": url, "title": None, "year": year, "make": make, "model": model,
-        "trim": "", "price": None, "color": None, "mileage_km": None,
-        "stock_number": None, "carfax_url": None
+        "url": url,
+        "title": None,
+        "year": year,
+        "make": make,
+        "model": model,
+        "trim": "",
+        "price": None,
+        "color": None,
+        "mileage_km": None,
+        "stock_number": None,
+        "carfax_url": None,
     }
     try:
-        s = BeautifulSoup(fetch(url), "lxml")  # detail pages are server-rendered
+        s = BeautifulSoup(fetch(url), "lxml")
+
+        # Title
         h = s.select_one("h1, .title, meta[property='og:title']")
-        v["title"] = h.get("content") if h and h.name == "meta" else (h.get_text(" ", strip=True) if h else url)
+        v["title"] = h.get("content") if h and h.name == "meta" else (
+            h.get_text(" ", strip=True) if h else url
+        )
         m = re.search(r"\b(20\d{2})\b", v["title"] or "")
-        if m: v["year"] = int(m.group(1))
-        pr = s.select_one(".price, [data-price]"); v["price"] = pr.get_text(" ", strip=True) if pr else None
-        st = s.select_one(".stock, [data-stock-number]"); v["stock_number"] = st.get_text(" ", strip=True) if st else None
-        mil = s.select_one(".mileage, [data-mileage]"); v["mileage_km"] = norm_km(mil.get_text(" ", strip=True)) if mil else None
-        col = s.select_one(".color, [data-color]"); v["color"] = col.get_text(" ", strip=True) if col else None
+        if m:
+            v["year"] = int(m.group(1))
+
+        # Price — several possible containers
+        p = s.select_one(
+            "[data-price], .vehicle-price, .vehicle-info__price, .price span, .price"
+        )
+        if p:
+            raw = p.get_text(" ", strip=True)
+            if "$" in raw:
+                raw = raw.split("$")[-1]
+            v["price"] = "$" + "".join(ch for ch in raw if ch.isdigit() or ch == ",")
+
+        # Stock number
+        st = s.find(
+            lambda tag: tag.name in ["li", "span", "div"]
+            and "stock" in tag.get_text(" ", strip=True).lower()
+        )
+        if st:
+            txt = st.get_text(" ", strip=True)
+            m = re.search(r"([A-Z]?\d{3,6})", txt)
+            if m:
+                v["stock_number"] = m.group(1)
+
+        # Mileage
+        mil = s.find(
+            lambda tag: tag.name in ["li", "span", "div"]
+            and "km" in tag.get_text(" ", strip=True).lower()
+        )
+        if mil:
+            txt = mil.get_text(" ", strip=True)
+            v["mileage_km"] = norm_km(txt)
+
+        # Color
+        col = s.find(
+            lambda tag: tag.name in ["li", "span", "div"]
+            and any(k in tag.get_text(" ", strip=True).lower() for k in ["color", "colour"])
+        )
+        if col:
+            raw = col.get_text(" ", strip=True)
+            # take the last word as color
+            v["color"] = raw.split()[-1].capitalize()
+
+        # Carfax link
         a = s.select_one("a[href*='carfax'], a[href*='vhr.carfax']")
-        v["carfax_url"] = urljoin(BASE, a["href"]) if a and a.has_attr("href") else None
+        if a and a.has_attr("href"):
+            v["carfax_url"] = urljoin(BASE, a["href"])
+
     except Exception as e:
         v["error"] = str(e)
     return v
+
 
 @app.get("/health")
 def health(): return {"ok": True}
