@@ -93,6 +93,7 @@ def title_matches(title, make, model, year, text):
     if year:  hit &= str(year)     in t
     return hit
 
+# ---- inventory_fetch 
 @app.get("/inventory/search")
 def inventory_search(
     make: str = Query(None),
@@ -154,7 +155,7 @@ def inventory_search(
     return JSONResponse(enriched)
 
 
-# ---- carfax_fetch (leave as is) ----
+# ---- carfax_fetch 
 @app.get("/inventory/carfax")
 def carfax_fetch(url: str = Query(...)):
     try:
@@ -165,3 +166,24 @@ def carfax_fetch(url: str = Query(...)):
         return {"carfax_url": carfax_url, "summary": summary}
     except Exception as e:
         return {"carfax_url": None, "summary": None, "error": str(e)}
+
+# ---- debug 
+@app.get("/inventory/debug")
+def inventory_debug(text: str = Query("2024 volkswagen tiguan")):
+    from hashlib import md5
+    q = "+".join(text.split())
+    url = f"{BASE}{INV}?text={q}"
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=20, allow_redirects=True)
+        html = r.text
+        return {
+            "url": url,
+            "status": r.status_code,
+            "len": len(html),
+            "md5": md5(html.encode("utf-8")).hexdigest(),
+            "has_used_inventory_links": "/used-inventory/" in html,
+            "first_800": html[:800]
+        }
+    } 
+    except Exception as e:
+        return {"url": url, "error": str(e)}
