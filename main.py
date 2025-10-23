@@ -184,6 +184,5 @@ def inventory_debug(text: str = Query("2024 volkswagen tiguan")):
             "has_used_inventory_links": "/used-inventory/" in html,
             "first_800": html[:800]
         }
-    } 
     except Exception as e:
         return {"url": url, "error": str(e)}
