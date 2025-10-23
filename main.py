@@ -94,6 +94,12 @@ def title_matches(title, make, model, year, text):
     return hit
 
 # ---- inventory_fetch 
+from fastapi import Query
+from fastapi.responses import JSONResponse
+from urllib.parse import urljoin
+from bs4 import BeautifulSoup
+import re
+
 @app.get("/inventory/search")
 def inventory_search(
     make: str = Query(None),
@@ -101,71 +107,71 @@ def inventory_search(
     year: str = Query(None),
     text: str = Query(None)
 ):
-    key = f"{make}|{model}|{year}|{text}"
-    if key in cache:
-        return JSONResponse(cache[key])
+    # cache key
+    key = f"links|{make}|{model}|{year}|{text}"
+    if key in cache: return JSONResponse(cache[key])
 
-    url = build_search_url(make, model, year, text)
+    # 1) Build server-side search URL (?text=…)
+    q = text or " ".join([x for x in [year, make, model] if x])
+    url = f"{BASE}{INV}?text={'+'.join(q.split())}" if q else f"{BASE}{INV}"
     html = fetch(url)
+
+    # 2) Extract vehicle links only (cards are inconsistent)
     soup = BeautifulSoup(html, "lxml")
-
-    # broad selection of possible cards/links
-    nodes = soup.select("[data-vehicle-card], .vehicle-card, .result-item, li.vehicle-list-item, article") \
-            or soup.select("a[href*='/used-inventory/']")
-    results = []
+    hrefs = []
     seen = set()
+    for a in soup.select("a[href*='/used-inventory/']"):
+        href = a.get("href") or ""
+        full = urljoin(BASE, href)
+        if "/used-inventory/" not in full: continue
+        if full in seen: continue
+        seen.add(full)
+        hrefs.append(full)
 
-    for el in nodes:
-        a = el if el.name == "a" else el.select_one("a[href*='/used-inventory/']")
-        href = a.get("href") if a else None
-        if not href: continue
-        url_v = urljoin(BASE, href)
-        if url_v in seen: continue
-        seen.add(url_v)
+    # 3) Optional title filtering from the link text if provided
+    terms = [t.lower() for t in q.split()] if q else []
+    def keep(url):
+        if not terms: return True
+        # use last path segment as pseudo-title
+        slug = url.rsplit("/", 1)[-1].replace("-", " ").lower()
+        return all(t in slug for t in terms)
+    hrefs = [u for u in hrefs if keep(u)]
 
-        title = (el.select_one(".title, h2, h3") or a)
-        title = title.get_text(" ", strip=True) if title else ""
+    # 4) Enrich detail pages to get real data (stock, mileage, color, carfax, title)
+    out = []
+    for u in hrefs[:10]:
+        v = {"url": u, "title": None, "year": None, "make": make, "model": model,
+             "trim": "", "price": None, "color": None, "mileage_km": None,
+             "stock_number": None, "carfax_url": None}
+        try:
+            s = BeautifulSoup(fetch(u), "lxml")
+            # title from H1/OG
+            h = s.select_one("h1, .title, meta[property='og:title']")
+            title = h.get("content") if h and h.name == "meta" else (h.get_text(" ", strip=True) if h else "")
+            v["title"] = title or v["url"]
+            m = re.search(r"\b(20\d{2})\b", title or "")
+            if m: v["year"] = int(m.group(1))
+            # price
+            pr = s.select_one(".price, [data-price]")
+            if pr: v["price"] = pr.get_text(" ", strip=True)
+            # stock / mileage / color
+            v["stock_number"] = (s.select_one(".stock, [data-stock-number]") or {}).get_text(" ", strip=True) if s.select_one(".stock, [data-stock-number]") else None
+            mil = (s.select_one(".mileage, [data-mileage]") or {}).get_text(" ", strip=True) if s.select_one(".mileage, [data-mileage]") else None
+            if mil:
+                mm = re.search(r"([\d,\.]+)\s*(?:km|kilomet)", mil, re.I)
+                v["mileage_km"] = int(float(mm.group(1).replace(",", ""))) if mm else None
+            col = (s.select_one(".color, [data-color]") or {}).get_text(" ", strip=True) if s.select_one(".color, [data-color]") else None
+            v["color"] = col or None
+            # carfax link
+            a = s.select_one("a[href*='carfax'], a[href*='vhr.carfax']")
+            v["carfax_url"] = urljoin(BASE, a["href"]) if a and a.has_attr("href") else None
+        except Exception:
+            pass
+        out.append(v)
 
-        # keep if title contains requested terms
-        if not title_matches(title, make, model, year, text):
-            continue
+    cache[key] = out
+    return JSONResponse(out)
 
-        price  = (el.select_one(".price, [data-price]") or {}).get_text(" ", strip=True) if hasattr(el.select_one(".price, [data-price]"), 'get_text') else ""
-        stock  = (el.select_one(".stock, [data-stock-number]") or {}).get_text(" ", strip=True) if hasattr(el.select_one(".stock, [data-stock-number]"), 'get_text') else ""
-        mileage= (el.select_one(".mileage, [data-mileage]") or {}).get_text(" ", strip=True) if hasattr(el.select_one(".mileage, [data-mileage]"), 'get_text') else ""
-        color  = (el.select_one(".color, [data-color]") or {}).get_text(" ", strip=True) if hasattr(el.select_one(".color, [data-color]"), 'get_text') else ""
-
-        yr = None
-        m = re.search(r"\b(20\d{2})\b", title)
-        if m: yr = int(m.group(1))
-
-        results.append({
-            "title": title, "year": yr or year, "make": make, "model": model,
-            "trim": "", "price": price or None, "color": color or None,
-            "mileage_km": norm_km(mileage) if mileage else None,
-            "stock_number": stock or None, "url": url_v, "carfax_url": None
-        })
-
-        if len(results) >= 10:
-            break
-
-    # enrich first 6
-    enriched = [enrich(v) for v in results[:6]]
-    cache[key] = enriched
-    return JSONResponse(enriched)
-
-
-# ---- carfax_fetch 
-@app.get("/inventory/carfax")
-def carfax_fetch(url: str = Query(...)):
-    try:
-        s = BeautifulSoup(fetch(url), "lxml")
-        a = s.select_one("a[href*='carfax'], a[href*='vhr.carfax']")
-        carfax_url = urljoin(BASE, a["href"]) if a and a.has_attr("href") else None
-        summary = text(s.select_one(".carfax, .history, .disclosure")) or None
-        return {"carfax_url": carfax_url, "summary": summary}
-    except Exception as e:
-        return {"carfax_url": None, "summary": None, "error": str(e)}
 
 # ---- debug 
 @app.get("/inventory/debug")
