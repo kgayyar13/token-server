@@ -60,82 +60,86 @@ def extract_vehicle_links(html: str):
         links.add(urljoin(BASE, m.group(0)))
     return list(links)
 
+LABELS_PRICE = {"price","our price","dealer price","internet price"}
+LABELS_MILE  = {"kilometres","kilometers","km","odometer"}
+LABELS_COLOR = {"exterior colour","exterior color","colour","color"}
+LABELS_STOCK = {"stock #","stock","stock number","stk"}
+
+def _clean_text(t):
+    return re.sub(r"\s+", " ", (t or "").strip())
+
+def _find_labeled_value(soup, labels:set[str]):
+    # 1) definition lists or spec tables (dt/dd, th/td)
+    for dt in soup.find_all(["dt","th"]):
+        key = _clean_text(dt.get_text()).lower()
+        if any(lbl in key for lbl in labels):
+            dd = dt.find_next_sibling(["dd","td"])
+            if dd:
+                return _clean_text(dd.get_text())
+    # 2) list items like "<li><strong>Stock</strong> L0135</li>"
+    for li in soup.find_all("li"):
+        txt = _clean_text(li.get_text(" "))
+        low = txt.lower()
+        if any(lbl in low for lbl in labels):
+            # remove the key part, keep value
+            for lbl in labels:
+                low = low.replace(lbl, "")
+                txt  = re.sub(lbl, "", txt, flags=re.I)
+            return _clean_text(txt)
+    # 3) generic “label: value” spans/divs
+    for el in soup.find_all(["div","span","p"]):
+        txt = _clean_text(el.get_text(" "))
+        low = txt.lower()
+        if any(lbl in low for lbl in labels) and ":" in txt:
+            return _clean_text(txt.split(":",1)[1])
+    return None
+
+def _parse_money(val):
+    if not val: return None
+    m = re.search(r"\$?\s*([\d,][\d,\.]*)", val)
+    return f"${m.group(1).replace(',,',',')}" if m else None
+
 def enrich_vehicle(url, make=None, model=None, year=None):
-    """Fetch detail page and extract all key data."""
     v = {
-        "url": url,
-        "title": None,
-        "year": year,
-        "make": make,
-        "model": model,
-        "trim": "",
-        "price": None,
-        "color": None,
-        "mileage_km": None,
-        "stock_number": None,
-        "carfax_url": None,
+        "url": url, "title": None, "year": year, "make": make, "model": model,
+        "trim": "", "price": None, "color": None, "mileage_km": None,
+        "stock_number": None, "carfax_url": None
     }
     try:
         s = BeautifulSoup(fetch(url), "lxml")
 
-        # Title
+        # Title and year
         h = s.select_one("h1, .title, meta[property='og:title']")
-        v["title"] = h.get("content") if h and h.name == "meta" else (
-            h.get_text(" ", strip=True) if h else url
-        )
+        v["title"] = h.get("content") if h and h.name=="meta" else (h.get_text(" ", strip=True) if h else url)
         m = re.search(r"\b(20\d{2})\b", v["title"] or "")
-        if m:
-            v["year"] = int(m.group(1))
+        if m: v["year"] = int(m.group(1))
 
-        # Price — several possible containers
-        p = s.select_one(
-            "[data-price], .vehicle-price, .vehicle-info__price, .price span, .price"
-        )
-        if p:
-            raw = p.get_text(" ", strip=True)
-            if "$" in raw:
-                raw = raw.split("$")[-1]
-            v["price"] = "$" + "".join(ch for ch in raw if ch.isdigit() or ch == ",")
+        # Labeled values
+        price_txt = _find_labeled_value(s, LABELS_PRICE)
+        odo_txt   = _find_labeled_value(s, LABELS_MILE)
+        color_txt = _find_labeled_value(s, LABELS_COLOR)
+        stock_txt = _find_labeled_value(s, LABELS_STOCK)
 
-        # Stock number
-        st = s.find(
-            lambda tag: tag.name in ["li", "span", "div"]
-            and "stock" in tag.get_text(" ", strip=True).lower()
-        )
-        if st:
-            txt = st.get_text(" ", strip=True)
-            m = re.search(r"([A-Z]?\d{3,6})", txt)
-            if m:
-                v["stock_number"] = m.group(1)
+        # Fallbacks for sites that put data in generic classes
+        if not price_txt:
+            p = s.select_one("[data-price], .vehicle-price, .price")
+            price_txt = _clean_text(p.get_text(" ")) if p else None
 
-        # Mileage
-        mil = s.find(
-            lambda tag: tag.name in ["li", "span", "div"]
-            and "km" in tag.get_text(" ", strip=True).lower()
-        )
-        if mil:
-            txt = mil.get_text(" ", strip=True)
-            v["mileage_km"] = norm_km(txt)
+        v["price"]        = _parse_money(price_txt)
+        v["mileage_km"]   = norm_km(odo_txt)
+        v["color"]        = None if not color_txt else _clean_text(color_txt).split()[-1].capitalize()
+        v["stock_number"] = None
+        if stock_txt:
+            m = re.search(r"[A-Za-z]?\d{3,7}", stock_txt)
+            v["stock_number"] = m.group(0) if m else _clean_text(stock_txt)
 
-        # Color
-        col = s.find(
-            lambda tag: tag.name in ["li", "span", "div"]
-            and any(k in tag.get_text(" ", strip=True).lower() for k in ["color", "colour"])
-        )
-        if col:
-            raw = col.get_text(" ", strip=True)
-            # take the last word as color
-            v["color"] = raw.split()[-1].capitalize()
-
-        # Carfax link
+        # Carfax
         a = s.select_one("a[href*='carfax'], a[href*='vhr.carfax']")
-        if a and a.has_attr("href"):
-            v["carfax_url"] = urljoin(BASE, a["href"])
+        v["carfax_url"] = urljoin(BASE, a["href"]) if a and a.has_attr("href") else None
 
     except Exception as e:
         v["error"] = str(e)
     return v
-
 
 @app.get("/health")
 def health(): return {"ok": True}
@@ -184,3 +188,14 @@ def carfax_fetch(url: str = Query(...)):
         return {"carfax_url": carfax_url, "summary": summary}
     except Exception as e:
         return {"carfax_url": None, "summary": None, "error": str(e)}
+
+@app.get("/inventory/debug-detail")
+def debug_detail(url: str):
+    s = BeautifulSoup(fetch(url), "lxml")
+    return {
+        "price_raw": _find_labeled_value(s, LABELS_PRICE),
+        "odo_raw": _find_labeled_value(s, LABELS_MILE),
+        "color_raw": _find_labeled_value(s, LABELS_COLOR),
+        "stock_raw": _find_labeled_value(s, LABELS_STOCK),
+        "price_fallback": text(s.select_one("[data-price], .vehicle-price, .price")) if s.select_one("[data-price], .vehicle-price, .price") else None
+    }
