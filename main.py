@@ -171,6 +171,7 @@ def carfax_fetch(url: str = Query(...)):
 @app.get("/inventory/debug")
 def inventory_debug(text: str = Query("2024 volkswagen tiguan")):
     from hashlib import md5
+    from urllib.parse import urlencode
     q = "+".join(text.split())
     url = f"{BASE}{INV}?text={q}"
     try:
