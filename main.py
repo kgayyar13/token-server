@@ -180,31 +180,45 @@ def enrich_vehicle(url, make=None, model=None, year=None):
             v["stock_number"] = m3.group(0) if m3 else _clean_text(stock_txt)
 
         full = soup.get_text(" ", strip=True)
+        
+        # VIN
         m = VIN_RX.search(full)
-        if m: v["vin"] = m.group(0)
+        if m:
+            v["vin"] = m.group(0)
+        
+        # Stock number (prefer explicit label, then strict dashed fallback)
         if not v["stock_number"]:
-            m = re.search(r"(?:Stock(?:\s+#| Number)?)\s*[:#]?\s*([A-Za-z]{0,3}\d{2}-\d{4,6}[A-Za-z]?)",
-              full, re.I)
+            m = re.search(r"(?:\bStock(?:\s+#| Number)?\b)\s*[:#]?\s*([A-Za-z]{0,3}\d{2}-\d{4,6}[A-Za-z]?)", full, re.I)
             if m:
                 v["stock_number"] = m.group(1)
             else:
-                # 2) Fallback: strict dashed pattern only (avoid "360" from 360 Camera)
                 m = re.search(r"\b[A-Za-z]{0,3}\d{2}-\d{4,6}[A-Za-z]?\b", full)
                 if m:
                     v["stock_number"] = m.group(0)
+        
+        # Trim
         m = TRIM_RX.search(full)
-        if m: v["trim"] = m.group(1).split(" - ")[0].strip()
+        if m:
+            v["trim"] = m.group(1).split(" - ")[0].strip()
+        
+        # Exterior color (guard against undefined mc)
         if not v["color"]:
-            mc = re.search(r"Ext\.?\s*Color\s*([A-Za-z][A-Za-z \-]+?)(?:\s{2,}|Int\.|Interior|Drivetrain|Frame|Bodystyle|Options|\d{1,3},?\d{0,3}\s*KM)",full, re.I)
-        if mc:
-            v["color"] = mc.group(1).strip().title() 
+            mc = re.search(
+                r"\bExt\.?\s*Color\b\s*([A-Za-z][A-Za-z \-]+?)(?:\s{2,}|Int\.|Interior|Drivetrain|Frame|Bodystyle|Options|\d{1,3},?\d{0,3}\s*KM)",
+                full, re.I
+            )
+            if mc:
+                v["color"] = mc.group(1).strip().title()
+        
+        # Odometer fallback
         if v["mileage_km"] is None:
             m = ODO_RX.search(full)
-            if m: v["mileage_km"] = int(float(m.group(1).replace(",", "")))
-
-        a = soup.select_one("a[href*='carfax'], a[href*='vhr.carfax']")
-        if a and a.has_attr("href"):
-            v["carfax_url"] = urljoin(BASE, a["href"])
+            if m:
+                v["mileage_km"] = int(float(m.group(1).replace(",", "")))
+        
+                a = soup.select_one("a[href*='carfax'], a[href*='vhr.carfax']")
+                if a and a.has_attr("href"):
+                    v["carfax_url"] = urljoin(BASE, a["href"])
 
     except Exception as e:
         v["error"] = str(e)
