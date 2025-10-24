@@ -45,19 +45,22 @@ def fetch(url: str) -> str:
     return r.text
 
 def fetch_rendered(url: str) -> str:
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
-        page = browser.new_page(user_agent=HEADERS["User-Agent"])
-        page.goto(url, wait_until="networkidle", timeout=45000)
-        # wait for any vehicle link to appear
-        try:
-            page.wait_for_selector("a[href*='/used-inventory/']", timeout=6000)
-        except Exception:
-            pass
-        page.wait_for_timeout(800)
-        html = page.content()
-        browser.close()
-        return html
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+            page = browser.new_page(user_agent=HEADERS["User-Agent"])
+            page.goto(url, wait_until="networkidle", timeout=45000)
+            try:
+                page.wait_for_selector("a[href*='/used-inventory/']", timeout=6000)
+            except Exception:
+                pass
+            page.wait_for_timeout(800)
+            html = page.content()
+            browser.close()
+            return html
+    except Exception:
+        # Fallback to plain fetch if Playwright fails
+        return fetch(url)
 
 def norm_km(txt):
     if not txt: return None
