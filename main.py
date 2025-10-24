@@ -99,6 +99,76 @@ def _parse_money(val):
     m = re.search(r"\$?\s*([\d,][\d,\.]*)", val)
     return f"${m.group(1).replace(',,',',')}" if m else None
 
+import json
+
+def _jsonld_vehicle(soup):
+    # find Vehicle/Product JSON-LD
+    for tag in soup.select("script[type='application/ld+json']"):
+        try:
+            data = json.loads(tag.string or "")
+        except Exception:
+            continue
+        # handle list or single object
+        nodes = data if isinstance(data, list) else [data]
+        for n in nodes:
+            t = (n.get("@type") or "").lower()
+            if t in ("vehicle","product"):
+                v = {}
+                # price
+                offers = n.get("offers") or {}
+                if isinstance(offers, list): offers = offers[0]
+                v["price"] = offers.get("price") or offers.get("priceSpecification", {}).get("price")
+                if v["price"]:
+                    v["price"] = f"${int(float(str(v['price']).replace(',',''))):,}"
+                # stock / sku
+                v["stock_number"] = n.get("sku") or n.get("mpn") or (offers.get("sku") if isinstance(offers, dict) else None)
+                # color
+                v["color"] = n.get("color") or (n.get("additionalProperty", {}).get("color") if isinstance(n.get("additionalProperty"), dict) else None)
+                # mileage (some sites use mileage/vehicleMileage/kilometers)
+                mileage = n.get("mileage") or n.get("vehicleMileage")
+                if isinstance(mileage, dict):
+                    mileage = mileage.get("value")
+                if mileage:
+                    try:
+                        v["mileage_km"] = int(str(mileage).replace(",",""))
+                    except Exception:
+                        pass
+                return v
+    return {}
+
+def _spec_scope(soup):
+    # narrow to the vehicle spec area to avoid "Similar vehicles"
+    scope = soup.select_one("section:has(h2:-soup-contains('Specification'))") \
+         or soup.select_one("section:has(h2:-soup-contains('Vehicle'))") \
+         or soup  # fallback whole page
+    return scope
+
+LABELS_PRICE = {"purchase price","price"}
+LABELS_MILE  = {"kilometres","kilometers","odometer","km"}
+LABELS_COLOR = {"exterior colour","exterior color","colour","color"}
+LABELS_STOCK = {"stock #","stock number","stock","stk"}
+
+def _find_labeled_value_in(scope, labels:set[str]):
+    # table-like (dt/dd or th/td)
+    for dt in scope.find_all(["dt","th"]):
+        key = dt.get_text(" ", strip=True).lower()
+        if any(lbl in key for lbl in labels):
+            dd = dt.find_next_sibling(["dd","td"])
+            if dd: return dd.get_text(" ", strip=True)
+    # list items: "<li><strong>Stock</strong> L0135</li>"
+    for li in scope.find_all("li"):
+        txt = li.get_text(" ", strip=True)
+        low = txt.lower()
+        if any(lbl in low for lbl in labels):
+            return re.sub(r"(?i)(" + "|".join(labels) + r")\s*[:#-]?\s*", "", txt).strip()
+    # generic "Label: Value"
+    for el in scope.find_all(["div","span","p"]):
+        txt = el.get_text(" ", strip=True)
+        low = txt.lower()
+        if any(lbl in low for lbl in labels) and ":" in txt:
+            return txt.split(":",1)[1].strip()
+    return None
+
 def enrich_vehicle(url, make=None, model=None, year=None):
     v = {
         "url": url, "title": None, "year": year, "make": make, "model": model,
@@ -106,40 +176,49 @@ def enrich_vehicle(url, make=None, model=None, year=None):
         "stock_number": None, "carfax_url": None
     }
     try:
-        s = BeautifulSoup(fetch(url), "lxml")
+        soup = BeautifulSoup(fetch(url), "lxml")
 
-        # Title and year
-        h = s.select_one("h1, .title, meta[property='og:title']")
+        # title/year
+        h = soup.select_one("h1, .title, meta[property='og:title']")
         v["title"] = h.get("content") if h and h.name=="meta" else (h.get_text(" ", strip=True) if h else url)
         m = re.search(r"\b(20\d{2})\b", v["title"] or "")
         if m: v["year"] = int(m.group(1))
 
-        # Labeled values
-        price_txt = _find_labeled_value(s, LABELS_PRICE)
-        odo_txt   = _find_labeled_value(s, LABELS_MILE)
-        color_txt = _find_labeled_value(s, LABELS_COLOR)
-        stock_txt = _find_labeled_value(s, LABELS_STOCK)
+        # 1) JSON-LD first
+        j = _jsonld_vehicle(soup)
+        if j:
+            v["price"]        = j.get("price") or v["price"]
+            v["stock_number"] = j.get("stock_number") or v["stock_number"]
+            v["color"]        = j.get("color") or v["color"]
+            v["mileage_km"]   = j.get("mileage_km") or v["mileage_km"]
 
-        # Fallbacks for sites that put data in generic classes
-        if not price_txt:
-            p = s.select_one("[data-price], .vehicle-price, .price")
-            price_txt = _clean_text(p.get_text(" ")) if p else None
+        # 2) Scoped spec scraping (avoid "Similar vehicles")
+        scope = _spec_scope(soup)
+        price_txt = _find_labeled_value_in(scope, LABELS_PRICE)
+        odo_txt   = _find_labeled_value_in(scope, LABELS_MILE)
+        color_txt = _find_labeled_value_in(scope, LABELS_COLOR)
+        stock_txt = _find_labeled_value_in(scope, LABELS_STOCK)
 
-        v["price"]        = _parse_money(price_txt)
-        v["mileage_km"]   = norm_km(odo_txt)
-        v["color"]        = None if not color_txt else _clean_text(color_txt).split()[-1].capitalize()
-        v["stock_number"] = None
+        # normalize
+        if price_txt and ("rebate" not in price_txt.lower()):
+            m2 = re.search(r"\$?\s*([\d,][\d,\.]*)", price_txt)
+            if m2: v["price"] = f"${m2.group(1).replace(',,',',')}"
+        if odo_txt:
+            v["mileage_km"] = norm_km(odo_txt)
+        if color_txt:
+            v["color"] = color_txt.split()[-1].capitalize()
         if stock_txt:
-            m = re.search(r"[A-Za-z]?\d{3,7}", stock_txt)
-            v["stock_number"] = m.group(0) if m else _clean_text(stock_txt)
+            m3 = re.search(r"[A-Za-z]{0,2}[-]?\d{3,7}", stock_txt)
+            v["stock_number"] = m3.group(0) if m3 else stock_txt
 
         # Carfax
-        a = s.select_one("a[href*='carfax'], a[href*='vhr.carfax']")
+        a = soup.select_one("a[href*='carfax'], a[href*='vhr.carfax']")
         v["carfax_url"] = urljoin(BASE, a["href"]) if a and a.has_attr("href") else None
 
     except Exception as e:
         v["error"] = str(e)
     return v
+
 
 @app.get("/health")
 def health(): return {"ok": True}
