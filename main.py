@@ -181,13 +181,21 @@ def enrich_vehicle(url, make=None, model=None, year=None):
         m = VIN_RX.search(full)
         if m: v["vin"] = m.group(0)
         if not v["stock_number"]:
-            m = STOCK_RX.search(full)
-            if m: v["stock_number"] = m.group(0)
+            m = re.search(r"(?:Stock(?:\s+#| Number)?)\s*[:#]?\s*([A-Za-z]{0,3}\d{2}-\d{4,6}[A-Za-z]?)",
+              full, re.I)
+            if m:
+                v["stock_number"] = m.group(1)
+            else:
+                # 2) Fallback: strict dashed pattern only (avoid "360" from 360 Camera)
+                m = re.search(r"\b[A-Za-z]{0,3}\d{2}-\d{4,6}[A-Za-z]?\b", full)
+                if m:
+                    v["stock_number"] = m.group(0)
         m = TRIM_RX.search(full)
         if m: v["trim"] = m.group(1).split(" - ")[0].strip()
         if not v["color"]:
-            m = EXT_RX.search(full)
-            if m: v["color"] = m.group(1).strip().title()
+            mc = re.search(r"Ext\.?\s*Color\s*([A-Za-z][A-Za-z \-]+?)(?:\s{2,}|Int\.|Interior|Drivetrain|Frame|Bodystyle|Options|\d{1,3},?\d{0,3}\s*KM)",full, re.I)
+        if mc:
+            v["color"] = mc.group(1).strip().title() 
         if v["mileage_km"] is None:
             m = ODO_RX.search(full)
             if m: v["mileage_km"] = int(float(m.group(1).replace(",", "")))
