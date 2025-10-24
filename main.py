@@ -169,51 +169,76 @@ def _find_labeled_value_in(scope, labels:set[str]):
             return txt.split(":",1)[1].strip()
     return None
 
+VIN_RX   = re.compile(r"\b[A-HJ-NPR-Z0-9]{17}\b")
+STOCK_RX = re.compile(r"\b[A-Z]{0,2}?\d{2}-\d{4,6}[A-Z]?\b")  # e.g., 26-0058A
+TRIM_RX  = re.compile(r"Trim\s+([A-Za-z0-9\- ]+?)(?:\s+\d{2}-\d{4,6}[A-Z]?|\s+VIN|\s+Automatic|\s+Bodystyle)", re.I)
+EXT_RX   = re.compile(r"Ext\.?\s*\.?\s*Color\s*([A-Za-z \-]+)", re.I)
+ODO_RX   = re.compile(r"([\d,\.]+)\s*(?:KM|Kilometres?|Kilometers?)", re.I)
+
+def _mm_from_title(title:str):
+    if not title: return None, None
+    # "2024 Volkswagen Tiguan ..."
+    parts = title.split()
+    if len(parts) >= 3 and parts[0].isdigit():
+        return parts[1], parts[2]
+    return None, None
+
 def enrich_vehicle(url, make=None, model=None, year=None):
     v = {
-        "url": url, "title": None, "year": year, "make": make, "model": model,
-        "trim": "", "price": None, "color": None, "mileage_km": None,
-        "stock_number": None, "carfax_url": None
+        "url": url, "title": None, "year": year,
+        "make": make, "model": model, "trim": "",
+        "price": None, "color": None, "mileage_km": None,
+        "stock_number": None, "vin": None, "carfax_url": None
     }
     try:
         soup = BeautifulSoup(fetch(url), "lxml")
 
-        # title/year
+        # Title + year + make/model from title
         h = soup.select_one("h1, .title, meta[property='og:title']")
-        v["title"] = h.get("content") if h and h.name=="meta" else (h.get_text(" ", strip=True) if h else url)
-        m = re.search(r"\b(20\d{2})\b", v["title"] or "")
+        title = h.get("content") if h and h.name=="meta" else (h.get_text(" ", strip=True) if h else "")
+        v["title"] = title or url
+        m = re.search(r"\b(20\d{2})\b", title or "")
         if m: v["year"] = int(m.group(1))
+        mk, md = _mm_from_title(title)
+        v["make"]  = v["make"]  or mk
+        v["model"] = v["model"] or md
 
-        # 1) JSON-LD first
-        j = _jsonld_vehicle(soup)
-        if j:
-            v["price"]        = j.get("price") or v["price"]
-            v["stock_number"] = j.get("stock_number") or v["stock_number"]
-            v["color"]        = j.get("color") or v["color"]
-            v["mileage_km"]   = j.get("mileage_km") or v["mileage_km"]
+        # Use full page text for labeled values (avoids “Similar vehicles” widgets)
+        full = soup.get_text(" ", strip=True)
 
-        # 2) Scoped spec scraping (avoid "Similar vehicles")
-        scope = _spec_scope(soup)
-        price_txt = _find_labeled_value_in(scope, LABELS_PRICE)
-        odo_txt   = _find_labeled_value_in(scope, LABELS_MILE)
-        color_txt = _find_labeled_value_in(scope, LABELS_COLOR)
-        stock_txt = _find_labeled_value_in(scope, LABELS_STOCK)
+        # VIN
+        m = VIN_RX.search(full)
+        if m: v["vin"] = m.group(0)
 
-        # normalize
-        if price_txt and ("rebate" not in price_txt.lower()):
-            m2 = re.search(r"\$?\s*([\d,][\d,\.]*)", price_txt)
-            if m2: v["price"] = f"${m2.group(1).replace(',,',',')}"
-        if odo_txt:
-            v["mileage_km"] = norm_km(odo_txt)
-        if color_txt:
-            v["color"] = color_txt.split()[-1].capitalize()
-        if stock_txt:
-            m3 = re.search(r"[A-Za-z]{0,2}[-]?\d{3,7}", stock_txt)
-            v["stock_number"] = m3.group(0) if m3 else stock_txt
+        # Stock number like 26-0058A
+        m = STOCK_RX.search(full)
+        if m: v["stock_number"] = m.group(0)
 
-        # Carfax
+        # Trim (take clean part before specs or stock/VIN)
+        m = TRIM_RX.search(full)
+        if m:
+            trim = m.group(1).strip()
+            # drop marketing add-ons after " - "
+            v["trim"] = trim.split(" - ")[0].strip()
+
+        # Exterior colour
+        m = EXT_RX.search(full)
+        if m:
+            v["color"] = m.group(1).strip().title()
+
+        # Odometer (already handled elsewhere, but ensure)
+        if v["mileage_km"] is None:
+            m = ODO_RX.search(full)
+            if m:
+                v["mileage_km"] = int(float(m.group(1).replace(",", "")))
+
+        # Price: ignore “Dealer Rebate …” and carousel text
+        # Many detail pages don’t show a single “Price” label; leave None if unsure.
+
+        # Carfax link
         a = soup.select_one("a[href*='carfax'], a[href*='vhr.carfax']")
-        v["carfax_url"] = urljoin(BASE, a["href"]) if a and a.has_attr("href") else None
+        if a and a.has_attr("href"):
+            v["carfax_url"] = urljoin(BASE, a["href"])
 
     except Exception as e:
         v["error"] = str(e)
