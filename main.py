@@ -26,7 +26,6 @@ LABELS_COLOR = {"exterior colour","exterior color","colour","color"}
 LABELS_STOCK = {"stock #","stock number","stock","stk"}
 
 VIN_RX   = re.compile(r"\b[A-HJ-NPR-Z0-9]{17}\b")
-STOCK_RX = re.compile(r"\b[A-Z]{0,2}?\d{2}-\d{4,6}[A-Z]?\b")   # e.g., 26-0058A
 TRIM_RX  = re.compile(r"Trim\s+([A-Za-z0-9\- ]+?)(?:\s+\d{2}-\d{4,6}[A-Z]?|\s+VIN|\s+Automatic|\s+Bodystyle)", re.I)
 EXT_RX   = re.compile(r"Ext\.?\s*Color\s*([A-Za-z \-]+)", re.I)
 ODO_RX   = re.compile(r"([\d,\.]+)\s*(?:KM|Kilometres?|Kilometers?)", re.I)
