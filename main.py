@@ -145,6 +145,7 @@ def enrich_vehicle(url, make=None, model=None, year=None):
     try:
         soup = BeautifulSoup(fetch(url), "lxml")
 
+        # title / year / make / model
         h = soup.select_one("h1, .title, meta[property='og:title']")
         title = h.get("content") if h and h.name=="meta" else (h.get_text(" ", strip=True) if h else "")
         v["title"] = title or url
@@ -154,71 +155,36 @@ def enrich_vehicle(url, make=None, model=None, year=None):
         v["make"]  = v["make"]  or mk
         v["model"] = v["model"] or md
 
-        # JSON-LD hints
-        j = _jsonld_vehicle(soup)
-        if j:
-            v["price"]        = j.get("price") or v["price"]
-            v["stock_number"] = j.get("stock_number") or v["stock_number"]
-            v["color"]        = j.get("color") or v["color"]
-            v["mileage_km"]   = j.get("mileage_km") or v["mileage_km"]
+        # scope down to specification area only
+        spec = soup.select_one("section:has(h2:-soup-contains('Specification'))") or soup
+        spec_txt = spec.get_text(" ", strip=True)
 
-        scope = _spec_scope(soup)
-        price_txt = _find_labeled_value_in(scope, LABELS_PRICE)
-        odo_txt   = _find_labeled_value_in(scope, LABELS_MILE)
-        color_txt = _find_labeled_value_in(scope, LABELS_COLOR)
-        stock_txt = _find_labeled_value_in(scope, LABELS_STOCK)
+        # VIN (17-char)
+        m = VIN_RX.search(spec_txt)
+        if m: v["vin"] = m.group(0)
 
-        if price_txt and ("rebate" not in price_txt.lower()):
-            m2 = re.search(r"\$?\s*([\d,][\d,\.]*)", price_txt)
-            if m2: v["price"] = f"${m2.group(1).replace(',,',',')}"
-        if odo_txt and v["mileage_km"] is None:
-            v["mileage_km"] = norm_km(odo_txt)
-        if color_txt:
-            v["color"] = _clean_text(color_txt).split()[-1].title()
-        if stock_txt and v["stock_number"] is None:
-            m3 = re.search(r"[A-Za-z]{0,2}[-]?\d{3,7}[A-Za-z]?", stock_txt)
-            v["stock_number"] = m3.group(0) if m3 else _clean_text(stock_txt)
+        # stock like 26-0058A inside spec only
+        m = re.search(r"\b[A-Z]{0,3}\d{2}-\d{4,6}[A-Z]?\b", spec_txt)
+        if m: v["stock_number"] = m.group(0)
 
-        full = soup.get_text(" ", strip=True)
-        
-        # VIN
-        m = VIN_RX.search(full)
-        if m:
-            v["vin"] = m.group(0)
-        
-        # Stock number (prefer explicit label, then strict dashed fallback)
-        if not v["stock_number"]:
-            m = re.search(r"(?:\bStock(?:\s+#| Number)?\b)\s*[:#]?\s*([A-Za-z]{0,3}\d{2}-\d{4,6}[A-Za-z]?)", full, re.I)
-            if m:
-                v["stock_number"] = m.group(1)
-            else:
-                m = re.search(r"\b[A-Za-z]{0,3}\d{2}-\d{4,6}[A-Za-z]?\b", full)
-                if m:
-                    v["stock_number"] = m.group(0)
-        
-        # Trim
-        m = TRIM_RX.search(full)
-        if m:
-            v["trim"] = m.group(1).split(" - ")[0].strip()
-        
-        # Exterior color (guard against undefined mc)
-        if not v["color"]:
-            mc = re.search(
-                r"\bExt\.?\s*Color\b\s*([A-Za-z][A-Za-z \-]+?)(?:\s{2,}|Int\.|Interior|Drivetrain|Frame|Bodystyle|Options|\d{1,3},?\d{0,3}\s*KM)",
-                full, re.I
-            )
-            if mc:
-                v["color"] = mc.group(1).strip().title()
-        
-        # Odometer fallback
-        if v["mileage_km"] is None:
-            m = ODO_RX.search(full)
-            if m:
-                v["mileage_km"] = int(float(m.group(1).replace(",", "")))
-        
-                a = soup.select_one("a[href*='carfax'], a[href*='vhr.carfax']")
-                if a and a.has_attr("href"):
-                    v["carfax_url"] = urljoin(BASE, a["href"])
+        # trim line (appears right after "Trim ")
+        m = re.search(r"Trim\s+([A-Za-z0-9\- ]+)", spec_txt, re.I)
+        if m: v["trim"] = m.group(1).split(" - ")[0].strip()
+
+        # color inside spec only
+        m = re.search(r"Ext\.?\s*Color\s*([A-Za-z][A-Za-z \-]+)", spec_txt, re.I)
+        if m: v["color"] = m.group(1).strip().title()
+
+        # mileage inside spec only
+        m = ODO_RX.search(spec_txt)
+        if m: v["mileage_km"] = int(float(m.group(1).replace(",", "")))
+
+        # Carfax link — fetch all a[href*='carfax'] inside page
+        a = soup.select_one("a[href*='carfax'], a[href*='vhr.carfax']")
+        if a and a.has_attr("href"):
+            href = a["href"]
+            # ensure absolute and canonical
+            v["carfax_url"] = href if href.startswith("http") else urljoin(BASE, href)
 
     except Exception as e:
         v["error"] = str(e)
