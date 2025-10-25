@@ -145,7 +145,7 @@ def enrich_vehicle(url, make=None, model=None, year=None):
     try:
         soup = BeautifulSoup(fetch(url), "lxml")
 
-        # title / year / make / model
+        # Title, year, make/model from title
         h = soup.select_one("h1, .title, meta[property='og:title']")
         title = h.get("content") if h and h.name=="meta" else (h.get_text(" ", strip=True) if h else "")
         v["title"] = title or url
@@ -155,53 +155,61 @@ def enrich_vehicle(url, make=None, model=None, year=None):
         v["make"]  = v["make"]  or mk
         v["model"] = v["model"] or md
 
-        # scope down to specification area only
-        spec = soup.select_one("section:has(h2:-soup-contains('Specification'))") or soup
+        # 1) JSON-LD
+        j = jsonld_vehicle(soup)
+        for k in ["price","stock_number","color","mileage_km"]:
+            if j.get(k): v[k] = v[k] or j[k]
+
+        # 2) meta tags
+        m2 = meta_vehicle(soup)
+        v["make"]  = v["make"]  or m2.get("make")
+        v["model"] = v["model"] or m2.get("model")
+
+        # 3) scoped specification block
+        spec = _spec_scope(soup)
         spec_txt = spec.get_text(" ", strip=True)
 
-        # --- VIN ---
+        # VIN
         m = VIN_RX.search(spec_txt)
-        if m:
+        if m and is_valid_vin(m.group(0)):
             v["vin"] = m.group(0)
-        
-        # --- STOCK (strict dashed pattern only, scoped) ---
-        m = re.search(r"\b[A-Za-z]{0,3}\d{2}-\d{4,6}[A-Za-z]?\b", spec_txt)
-        if m:
-            v["stock_number"] = m.group(0)
-        
-        # --- TRIM (remove 'level is ' prefix) ---
-        m = re.search(r"\bTrim\s+([A-Za-z0-9\- ]+)", spec_txt, re.I)
-        if m:
-            trim = m.group(1).split(" - ")[0].strip()
-            trim = re.sub(r"(?i)^level is\s+", "", trim)
-            v["trim"] = trim
-        
-        # --- COLOR (take first word only, scoped to 'Ext. Color') ---
+
+        # Stock: label or strict dashed pattern
+        if not v["stock_number"]:
+            m = re.search(r"(?:\bStock(?:\s+#| Number)?\b)\s*[:#]?\s*([A-Za-z]{0,3}\d{2}-\d{4,6}[A-Za-z]?)", spec_txt, re.I)
+            if m:
+                v["stock_number"] = m.group(1)
+            else:
+                m = STOCK_RX.search(spec_txt)
+                if m: v["stock_number"] = m.group(0)
+
+        # Trim: remove "level is "
+        mt = re.search(r"\bTrim\s+([A-Za-z0-9\- ]+)", spec_txt, re.I)
+        if mt:
+            trim = mt.group(1).split(" - ")[0].strip()
+            v["trim"] = re.sub(r"(?i)^level is\s+", "", trim)
+
+        # Color: only from "Ext. Color" line; take first token
         mc = re.search(r"\bExt\.?\s*Color\b\s*([A-Za-z][A-Za-z \-]+)", spec_txt, re.I)
         if mc:
-            color_raw = mc.group(1).strip()
-            # cut at known separators to avoid “Int Grey” etc.
-            color_raw = re.split(r"\s+(?:Int\.?|Interior|Drivetrain|Frame|Bodystyle|Options)\b", color_raw, 1)[0]
-            v["color"] = color_raw.split()[0].title()
-        
-        # --- MILEAGE (bind number to the label to avoid cross-contamination) ---
-        mo = re.search(
-            r"(?:Odometer|Kilometres?|Kilometers?)\D{0,12}(\d{1,3}(?:,\d{3})+|\d{3,6})\s*KM",
-            spec_txt, re.I
-        )
-        if mo:
-            v["mileage_km"] = int(mo.group(1).replace(",", ""))
-        elif v["mileage_km"] is None:
-            # last-chance scoped fallback
-            mo = re.search(r"\b(\d{1,3}(?:,\d{3})+|\d{3,6})\s*KM\b", spec_txt, re.I)
+            colour = re.split(r"\s+(?:Int\.?|Interior|Drivetrain|Frame|Bodystyle|Options)\b", mc.group(1).strip(), 1)[0]
+            v["color"] = colour.split()[0].title()
+
+        # Mileage: bind to label
+        if v["mileage_km"] is None:
+            mo = ODO_RX.search(spec_txt)
             if mo:
                 v["mileage_km"] = int(mo.group(1).replace(",", ""))
 
-        # Carfax link — fetch all a[href*='carfax'] inside page
+        # Price: only if a proper money value appears in spec
+        if v["price"] is None:
+            pt = _find_labeled_value_in(spec, LABELS_PRICE)
+            v["price"] = parse_price(pt)
+
+        # 4) Carfax
         a = soup.select_one("a[href*='carfax'], a[href*='vhr.carfax']")
         if a and a.has_attr("href"):
             href = a["href"]
-            # ensure absolute and canonical
             v["carfax_url"] = href if href.startswith("http") else urljoin(BASE, href)
 
     except Exception as e:
