@@ -159,25 +159,43 @@ def enrich_vehicle(url, make=None, model=None, year=None):
         spec = soup.select_one("section:has(h2:-soup-contains('Specification'))") or soup
         spec_txt = spec.get_text(" ", strip=True)
 
-        # VIN (17-char)
+        # --- VIN ---
         m = VIN_RX.search(spec_txt)
-        if m: v["vin"] = m.group(0)
-
-        # stock like 26-0058A inside spec only
-        m = re.search(r"\b[A-Z]{0,3}\d{2}-\d{4,6}[A-Z]?\b", spec_txt)
-        if m: v["stock_number"] = m.group(0)
-
-        # trim line (appears right after "Trim ")
-        m = re.search(r"Trim\s+([A-Za-z0-9\- ]+)", spec_txt, re.I)
-        if m: v["trim"] = m.group(1).split(" - ")[0].strip()
-
-        # color inside spec only
-        m = re.search(r"Ext\.?\s*Color\s*([A-Za-z][A-Za-z \-]+)", spec_txt, re.I)
-        if m: v["color"] = m.group(1).strip().title()
-
-        # mileage inside spec only
-        m = ODO_RX.search(spec_txt)
-        if m: v["mileage_km"] = int(float(m.group(1).replace(",", "")))
+        if m:
+            v["vin"] = m.group(0)
+        
+        # --- STOCK (strict dashed pattern only, scoped) ---
+        m = re.search(r"\b[A-Za-z]{0,3}\d{2}-\d{4,6}[A-Za-z]?\b", spec_txt)
+        if m:
+            v["stock_number"] = m.group(0)
+        
+        # --- TRIM (remove 'level is ' prefix) ---
+        m = re.search(r"\bTrim\s+([A-Za-z0-9\- ]+)", spec_txt, re.I)
+        if m:
+            trim = m.group(1).split(" - ")[0].strip()
+            trim = re.sub(r"(?i)^level is\s+", "", trim)
+            v["trim"] = trim
+        
+        # --- COLOR (take first word only, scoped to 'Ext. Color') ---
+        mc = re.search(r"\bExt\.?\s*Color\b\s*([A-Za-z][A-Za-z \-]+)", spec_txt, re.I)
+        if mc:
+            color_raw = mc.group(1).strip()
+            # cut at known separators to avoid “Int Grey” etc.
+            color_raw = re.split(r"\s+(?:Int\.?|Interior|Drivetrain|Frame|Bodystyle|Options)\b", color_raw, 1)[0]
+            v["color"] = color_raw.split()[0].title()
+        
+        # --- MILEAGE (bind number to the label to avoid cross-contamination) ---
+        mo = re.search(
+            r"(?:Odometer|Kilometres?|Kilometers?)\D{0,12}(\d{1,3}(?:,\d{3})+|\d{3,6})\s*KM",
+            spec_txt, re.I
+        )
+        if mo:
+            v["mileage_km"] = int(mo.group(1).replace(",", ""))
+        elif v["mileage_km"] is None:
+            # last-chance scoped fallback
+            mo = re.search(r"\b(\d{1,3}(?:,\d{3})+|\d{3,6})\s*KM\b", spec_txt, re.I)
+            if mo:
+                v["mileage_km"] = int(mo.group(1).replace(",", ""))
 
         # Carfax link — fetch all a[href*='carfax'] inside page
         a = soup.select_one("a[href*='carfax'], a[href*='vhr.carfax']")
